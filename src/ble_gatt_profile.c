@@ -25,13 +25,13 @@ static struct bt_uuid_16 custom_Read_service_uuid = BT_UUID_INIT_16(0x1200);
 static struct bt_uuid_16 custom_Read_char_uuid = BT_UUID_INIT_16(0x1210);
 
 static struct bt_uuid_16 custom_write_char_uuid = BT_UUID_INIT_16(0x1220);
-
-static struct bt_uuid_16 custom_Read_des_uuid = BT_UUID_INIT_16(0x1211);
 #endif
 
 static uint8_t Rx_data[RX_BUF_SIZE];
 static uint8_t Tx_data[10];
+
 const struct device *uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
+struct k_timer *timer;
 
 #if 1
 static ssize_t notify_custom_char(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -47,6 +47,7 @@ static ssize_t notify_custom_char(struct bt_conn *conn, const struct bt_gatt_att
 }
 #endif
 
+#if 1
 static ssize_t write_custom_value(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   const void *buf, uint16_t len, uint16_t offset,
                                   uint8_t flags)
@@ -66,6 +67,7 @@ static ssize_t write_custom_value(struct bt_conn *conn, const struct bt_gatt_att
     }
     return len;
 }
+#endif
 
 #if 0
 BT_GATT_SERVICE_DEFINE(Data_write,
@@ -76,6 +78,10 @@ BT_GATT_SERVICE_DEFINE(Data_write,
                            NULL, write_custom_value, Rx_data),
 );
 #endif
+void CCC_cb(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    bt_gatt_attr_read(NULL, attr, &Tx_data[0], 1, 0, 3, 1);
+}
 
 #if 1
 BT_GATT_SERVICE_DEFINE(custom_service,
@@ -84,18 +90,14 @@ BT_GATT_SERVICE_DEFINE(custom_service,
                            BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_READ,
                            notify_custom_char, NULL, Tx_data),
-    BT_GATT_DESCRIPTOR(&custom_Read_des_uuid.uuid,
-                        BT_GATT_PERM_READ,
-                        notify_custom_char,
-                        NULL,Tx_data),
+    BT_GATT_CCC(CCC_cb, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
     BT_GATT_CHARACTERISTIC(&custom_write_char_uuid.uuid,
                            BT_GATT_CHRC_WRITE,
                            BT_GATT_PERM_WRITE,
-                           NULL, write_custom_value, Rx_data),
-    BT_GATT_CCC(notify_custom_char,
-		        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+                           NULL, write_custom_value, Rx_data)
 );
 #endif
+
 int configure_uart(void)
 {
     int ret;
@@ -115,10 +117,14 @@ int configure_uart(void)
 
 }
 
+void timer_exp_cb(struct k_timer *timer)
+{
+    notify_custom_char(NULL, attr_custom_service, Tx_data, 10, 0);
+}
+
 int main(void)
 {
     int err;
-
     static const struct bt_data ad[] = {
 	BT_DATA(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR), sizeof((BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR))),
     };
@@ -136,6 +142,18 @@ int main(void)
     if (err) {
         return 1;
     }
+#if 0 /* configuration for uart irq*/
+    err = uart_irq_callback_set(uart_dev, uart_rx_cb);
+	if(err)
+		return 1;
+
+	uart_irq_rx_enable(uart_dev);
+#endif
+
+#if 0/* configuration for timer */
+    k_timer_init(timer, timer_exp_cb, NULL);
+    k_timer_start(timer, K_MSEC(20), K_MSEC(20));
+#endif
     
     while (1) {
 
