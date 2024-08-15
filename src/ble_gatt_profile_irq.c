@@ -6,7 +6,11 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 
-#if 1
+#define MIN_CONNECTION_INTERVAL 16	/* 20ms connection interval */
+#define MAX_CONNECTION_INTERVAL 16	/* 20ms connection interval */
+#define SUPERVISOR_TIMEOUT 400		/* 4s connection timeout */
+
+/* UUID for services and characteristic */
 static struct bt_uuid_128 custom_Read_service_uuid =BT_UUID_INIT_128(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
                                                                    0x00, 0x10, 0x00, 0x00, 0xe0, 0xff, 0x00, 0x00);
 
@@ -18,10 +22,10 @@ static struct bt_uuid_128 custom_a_char_uuid = BT_UUID_INIT_128(0xfb, 0x34, 0x9b
 
 static struct bt_uuid_128 custom_b_char_uuid = BT_UUID_INIT_128(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
                                                                    0x00, 0x10, 0x00, 0x00, 0xe3, 0xff, 0x00, 0x00);
-#endif
 
 static uint8_t Rx_data[10];
 static uint8_t Tx_data[10];
+k_tid_t Data_Recive_Thread_ID; 
 volatile bool notify_flag;
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
@@ -37,7 +41,6 @@ void CCC_cb(const struct bt_gatt_attr *attr, uint16_t value)
 {
     bool data = value ==  BT_GATT_CCC_NOTIFY;
 }
-
 
 BT_GATT_SERVICE_DEFINE(custom_service,
     BT_GATT_PRIMARY_SERVICE(&custom_Read_service_uuid),
@@ -58,7 +61,7 @@ BT_GATT_SERVICE_DEFINE(custom_service,
     BT_GATT_CCC(CCC_cb, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
-void uart_rx_cb(const struct device *uart_dev, void *user_data)
+void Recive_data(const struct device *uart_dev, void *user_data)
 {
     int ret;
     unsigned int index = 0;
@@ -75,17 +78,20 @@ void uart_rx_cb(const struct device *uart_dev, void *user_data)
         ret = uart_fifo_read(uart_dev, Tx_data + index, sizeof(Tx_data));
         index += ret;
     }
-    uart_irq_rx_disable(uart_dev);
+    bt_gatt_notify(NULL, &custom_service.attrs[1], Tx_data, sizeof(Tx_data));
+    uart_irq_rx_enable(uart_dev);
+    k_thread_suspend(Data_Recive_Thread_ID);
 }
 
-void notify_timer_handler(struct k_timer *dummy)
+void uart_rx_cb(const struct devices *dev, void *userdata)
 {
-    notify_flag = true;
+    uart_irq_rx_disable(uart_dev);
+    k_thread_resume(Data_Recive_Thread_ID);
 }
 
 void connected(struct bt_conn *conn, uint8_t err)
 {
-     struct bt_le_conn_param *param = BT_LE_CONN_PARAM(16, 16, 0, 400);
+     struct bt_le_conn_param *param = BT_LE_CONN_PARAM(MIN_CONNECTION_INTERVAL, MAX_CONNECTION_INTERVAL , 0, SUPERVISOR_TIMEOUT);
      bt_conn_le_param_update(conn, param);
 }
 
@@ -93,12 +99,13 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected,
 };
 
-
 int main(void)
 {
     int err;
     struct uart_config uart_cfg;
-    struct k_timer notify_timer;
+
+    static struct k_thread Data_Recive_Thread;
+    static K_THREAD_STACK_DEFINE(Data_Recive_Thread_stack, 512);
 
     static const struct bt_data ad[] = {
         BT_DATA(BT_DATA_FLAGS, (BT_LE_AD_GENERAL), sizeof((BT_LE_AD_GENERAL))),
@@ -123,6 +130,13 @@ int main(void)
     if(err)
         return 1;
 
+    uart_irq_rx_enable(uart_dev);
+
+
+    Data_Recive_Thread_ID = k_thread_create(&Data_Recive_Thread, Data_Recive_Thread_stack, 
+		     K_THREAD_STACK_SIZEOF(Data_Recive_Thread_stack), Recive_data, NULL, NULL, NULL, 1, 0, K_NO_WAIT);
+    k_thread_suspend(Data_Recive_Thread_ID);
+
     err = bt_enable(NULL);
     if (err) {
         return 1;
@@ -132,18 +146,5 @@ int main(void)
     if (err) {
         return 1;
     } 
-    uart_irq_rx_enable(uart_dev);
-
-    k_timer_init(&notify_timer, notify_timer_handler, NULL);
-    k_timer_start(&notify_timer, K_MSEC(20), K_MSEC(20));
-
-    while(1) {
-        if (notify_flag) {
-            notify_flag = false;
-            bt_gatt_notify(NULL, &custom_service.attrs[1], Tx_data, sizeof(Tx_data));
-	    uart_irq_rx_enable(uart_dev);
-
-        }
-    }
     return 0;
 }
