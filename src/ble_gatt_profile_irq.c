@@ -25,7 +25,8 @@ static struct bt_uuid_128 custom_b_char_uuid = BT_UUID_INIT_128(0xfb, 0x34, 0x9b
 
 static uint8_t Rx_data[10];
 static uint8_t Tx_data[10];
-k_tid_t Data_Recive_Thread_ID; 
+static uint8_t data_packet[10];
+static uint8_t alert_packet[10];
 volatile bool notify_flag;
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
@@ -61,43 +62,32 @@ BT_GATT_SERVICE_DEFINE(custom_service,
     BT_GATT_CCC(CCC_cb, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
-void Recive_data(const struct device *uart_dev, void *user_data)
-{
-    int ret;
-    unsigned int index = 0;
-
-    ret = uart_irq_update(uart_dev);
-    if(ret != 1) 
-        return;
-
-    ret = uart_irq_rx_ready(uart_dev);
-    if(ret != 1) 
-        return;
-
-    while(index < 10) {
-        ret = uart_fifo_read(uart_dev, Tx_data + index, sizeof(Tx_data));
-        index += ret;
-    }
-    bt_gatt_notify(NULL, &custom_service.attrs[1], Tx_data, sizeof(Tx_data));
-    uart_irq_rx_enable(uart_dev);
-    k_thread_suspend(Data_Recive_Thread_ID);
-}
-
-void uart_rx_cb(const struct devices *dev, void *userdata)
-{
-    uart_irq_rx_disable(uart_dev);
-    k_thread_resume(Data_Recive_Thread_ID);
-}
-
 void connected(struct bt_conn *conn, uint8_t err)
 {
-     struct bt_le_conn_param *param = BT_LE_CONN_PARAM(MIN_CONNECTION_INTERVAL, MAX_CONNECTION_INTERVAL , 0, SUPERVISOR_TIMEOUT);
-     bt_conn_le_param_update(conn, param);
+	struct bt_le_conn_param *param = BT_LE_CONN_PARAM(MIN_CONNECTION_INTERVAL, MAX_CONNECTION_INTERVAL , 0, SUPERVISOR_TIMEOUT);
+	bt_conn_le_param_update(conn, param);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
-    .connected = connected,
+	.connected = connected,
 };
+
+static void uart_rx_callback(const struct device *dev, struct uart_event *evt, void *user_data)
+{
+	switch (evt->type) {
+		case UART_RX_RDY:
+			notify_flag = 1;
+			break;
+		case UART_RX_DISABLED:
+			ret = uart_rx_enable(uart_dev, rx_buffer, RX_BUF_SIZE, 100);
+			break;
+		case UART_RX_BUF_REQUEST:
+			uart_rx_buf_rsp(dev, rx_buffer, RX_BUF_SIZE);
+			break;
+		default:
+			break;
+	}
+}
 
 int main(void)
 {
@@ -112,7 +102,7 @@ int main(void)
     };
 
     static const struct bt_data sd[] = {
-        BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+	    BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
     };
 
     uart_cfg.baudrate = 57600;
@@ -123,28 +113,36 @@ int main(void)
 
     err = uart_configure(uart_dev, &uart_cfg);
     if(err){
-        return 1;
+	    return 1;
     }
 
-    err = uart_irq_callback_user_data_set(uart_dev, uart_rx_cb, NULL);
-    if(err)
-        return 1;
+    ret = uart_callback_set(uart_dev, uart_tx_callback, NULL);
+    if (ret != 0) {
+	    LOG_ERR("Failed to set UART TX callback");
+	    return;
+    }
 
-    uart_irq_rx_enable(uart_dev);
-
-
-    Data_Recive_Thread_ID = k_thread_create(&Data_Recive_Thread, Data_Recive_Thread_stack, 
-		     K_THREAD_STACK_SIZEOF(Data_Recive_Thread_stack), Recive_data, NULL, NULL, NULL, 1, 0, K_NO_WAIT);
-    k_thread_suspend(Data_Recive_Thread_ID);
+    ret = uart_rx_enable(uart_dev, rx_buffer, RX_BUF_SIZE, 100);
+    if (ret != 0) {
+	    LOG_ERR("Failed to enable UART RX");
+	    return;
+    }
 
     err = bt_enable(NULL);
     if (err) {
-        return 1;
+	    return 1;
     }
 
     err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (err) {
-        return 1;
-    } 
+	    return 1;
+    }
+    while(1) {
+	    if(notify_flag) {
+		    bt_gatt_notify(NULL, &custom_service.attrs[1], rx_data, sizeof(rx_data));
+		    notify_flag = 0;
+	    }
+    }
+
     return 0;
 }
