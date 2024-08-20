@@ -105,9 +105,7 @@ void Receive_data(void)
 
     while(index < 10) {
         ret = uart_poll_in(uart_dev, (Tx_data + index));
-        if(!ret && *Tx_data == 0x2A) {
-            index++;
-        }
+        index += !ret;
     }
     bt_gatt_notify(NULL, &custom_service.attrs[1], Tx_data, sizeof(Tx_data));
 }
@@ -115,7 +113,7 @@ void Receive_data(void)
 int main(void)
 {
     int err;
-    unsigned int index = 0, breath_type = 0;
+    struct uart_config uart_cfg;
 
     static const struct bt_data ad[] = {
 	BT_DATA(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR), sizeof((BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR))),
@@ -124,6 +122,16 @@ int main(void)
     static const struct bt_data sd[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
     };
+
+    uart_cfg.baudrate = 57600;
+    uart_cfg.parity = UART_CFG_PARITY_NONE;
+    uart_cfg.stop_bits = UART_CFG_STOP_BITS_1;
+    uart_cfg.flow_ctrl = UART_CFG_FLOW_CTRL_RTS_CTS;
+    uart_cfg.data_bits = UART_CFG_DATA_BITS_8;
+
+    err = uart_configure(uart_dev, &uart_cfg);
+    if(err)
+            return 1;
     
     err = bt_enable(NULL);
     if (err) {

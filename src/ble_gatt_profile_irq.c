@@ -25,9 +25,9 @@ static struct bt_uuid_128 custom_b_char_uuid = BT_UUID_INIT_128(0xfb, 0x34, 0x9b
 
 static uint8_t Rx_data[10];
 static uint8_t Tx_data[10];
-static uint8_t data_packet[10];
-static uint8_t alert_packet[10];
-volatile bool notify_flag;
+volatile static uint8_t data_packet[10];
+volatile static uint8_t alert_packet[10];
+volatile bool notify_data_flag, notify_alert_flag;
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
 
@@ -35,12 +35,12 @@ static ssize_t notify_custom_char(struct bt_conn *conn, const struct bt_gatt_att
                                 void *buf, uint16_t len, uint16_t offset)
 {
     char *value = attr->user_data;
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(Tx_data));
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, value, 10);
 }
 
 void CCC_cb(const struct bt_gatt_attr *attr, uint16_t value)
 {
-    bool data = value ==  BT_GATT_CCC_NOTIFY;
+   // bool data = value ==  BT_GATT_CCC_NOTIFY;
 }
 
 BT_GATT_SERVICE_DEFINE(custom_service,
@@ -48,12 +48,12 @@ BT_GATT_SERVICE_DEFINE(custom_service,
     BT_GATT_CHARACTERISTIC(&custom_Read_char_uuid.uuid,
                            BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_READ,
-                           notify_custom_char, NULL, Rx_data),
+                           notify_custom_char, NULL, data_packet),
     BT_GATT_CCC(CCC_cb, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
     BT_GATT_CHARACTERISTIC(&custom_a_char_uuid.uuid,
-                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-                           BT_GATT_PERM_WRITE,
-                           NULL, NULL, Rx_data),
+                           BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           notify_custom_char, NULL, alert_packet),
     BT_GATT_CCC(CCC_cb, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
     BT_GATT_CHARACTERISTIC(&custom_b_char_uuid.uuid,
                             BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
@@ -76,13 +76,20 @@ static void uart_rx_callback(const struct device *dev, struct uart_event *evt, v
 {
 	switch (evt->type) {
 		case UART_RX_RDY:
-			notify_flag = 1;
+			if(Rx_data[1] == 0x4C) {
+				memmove(data_packet, Rx_data, 10);
+				notify_data_flag = 1;
+			}
+			if(Rx_data[1] == 0x4D) {
+				memmove(alert_packet, Rx_data, 10);
+				notify_alert_flag = 1;
+			}
 			break;
 		case UART_RX_DISABLED:
-			ret = uart_rx_enable(uart_dev, rx_buffer, RX_BUF_SIZE, 100);
+			uart_rx_enable(uart_dev, Rx_data, 10, 100);
 			break;
 		case UART_RX_BUF_REQUEST:
-			uart_rx_buf_rsp(dev, rx_buffer, RX_BUF_SIZE);
+			uart_rx_buf_rsp(dev, Rx_data, 10);
 			break;
 		default:
 			break;
@@ -93,9 +100,6 @@ int main(void)
 {
     int err;
     struct uart_config uart_cfg;
-
-    static struct k_thread Data_Recive_Thread;
-    static K_THREAD_STACK_DEFINE(Data_Recive_Thread_stack, 512);
 
     static const struct bt_data ad[] = {
         BT_DATA(BT_DATA_FLAGS, (BT_LE_AD_GENERAL), sizeof((BT_LE_AD_GENERAL))),
@@ -108,7 +112,7 @@ int main(void)
     uart_cfg.baudrate = 57600;
     uart_cfg.parity = UART_CFG_PARITY_NONE;
     uart_cfg.stop_bits = UART_CFG_STOP_BITS_1;
-    uart_cfg.flow_ctrl = UART_CFG_FLOW_CTRL_RTS_CTS;
+    uart_cfg.flow_ctrl = UART_CFG_FLOW_CTRL_NONE;
     uart_cfg.data_bits = UART_CFG_DATA_BITS_8;
 
     err = uart_configure(uart_dev, &uart_cfg);
@@ -116,16 +120,14 @@ int main(void)
 	    return 1;
     }
 
-    ret = uart_callback_set(uart_dev, uart_tx_callback, NULL);
-    if (ret != 0) {
-	    LOG_ERR("Failed to set UART TX callback");
+    err = uart_callback_set(uart_dev, uart_rx_callback, NULL);
+    if (err != 0) {
 	    return;
     }
 
-    ret = uart_rx_enable(uart_dev, rx_buffer, RX_BUF_SIZE, 100);
-    if (ret != 0) {
-	    LOG_ERR("Failed to enable UART RX");
-	    return;
+    err = uart_rx_enable(uart_dev, Rx_data, 10, 100);
+    if (err != 0) {
+	    return 1;
     }
 
     err = bt_enable(NULL);
@@ -138,10 +140,16 @@ int main(void)
 	    return 1;
     }
     while(1) {
-	    if(notify_flag) {
-		    bt_gatt_notify(NULL, &custom_service.attrs[1], rx_data, sizeof(rx_data));
-		    notify_flag = 0;
+	    if(notify_data_flag) {
+		    notify_data_flag = 0;
+		    bt_gatt_notify(NULL, &custom_service.attrs[1], data_packet, sizeof(data_packet));
 	    }
+#if 0
+	    if(notify_alert_flag) {
+		    notify_alert_flag = 0;
+		    bt_gatt_notify(NULL, &custom_service.attrs[3], alert_packet, sizeof(alert_packet));
+	    }
+#endif
     }
 
     return 0;
