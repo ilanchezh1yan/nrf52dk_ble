@@ -6,7 +6,7 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 
-#define MIN_CONNECTION_INTERVAL 16	/* 20ms connection interval */
+#define MIN_CONNECTION_INTERVAL 16	/* 7.25ms connection interval */
 #define MAX_CONNECTION_INTERVAL 16	/* 20ms connection interval */
 #define SUPERVISOR_TIMEOUT 400		/* 4s connection timeout */
 
@@ -27,7 +27,8 @@ static uint8_t Rx_data[10];
 static uint8_t Tx_data[10];
 volatile static uint8_t data_packet[10];
 volatile static uint8_t alert_packet[10];
-volatile bool notify_data_flag, notify_alert_flag;
+volatile bool notify_data_flag;
+volatile bool notify_alert_flag;
 
 const struct device *uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
 
@@ -74,15 +75,14 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 
 static void uart_rx_callback(const struct device *dev, struct uart_event *evt, void *user_data)
 {
+	unsigned char *ATT_index = (unsigned char *)user_data;
 	switch (evt->type) {
 		case UART_RX_RDY:
 			if(Rx_data[1] == 0x4C) {
-				memmove(data_packet, Rx_data, 10);
-				notify_data_flag = 1;
+				*ATT_index = 1;
 			}
 			if(Rx_data[1] == 0x4D) {
-				memmove(alert_packet, Rx_data, 10);
-				notify_alert_flag = 1;
+				*ATT_index = 3;
 			}
 			break;
 		case UART_RX_DISABLED:
@@ -100,6 +100,7 @@ int main(void)
 {
     int err;
     struct uart_config uart_cfg;
+    unsigned char att_index = 0;
 
     static const struct bt_data ad[] = {
         BT_DATA(BT_DATA_FLAGS, (BT_LE_AD_GENERAL), sizeof((BT_LE_AD_GENERAL))),
@@ -120,12 +121,12 @@ int main(void)
 	    return 1;
     }
 
-    err = uart_callback_set(uart_dev, uart_rx_callback, NULL);
+    err = uart_callback_set(uart_dev, uart_rx_callback, &att_index);
     if (err != 0) {
 	    return;
     }
 
-    err = uart_rx_enable(uart_dev, Rx_data, 10, 100);
+    err = uart_rx_enable(uart_dev, Rx_data, 10,  SYS_FOREVER_US);
     if (err != 0) {
 	    return 1;
     }
@@ -140,16 +141,10 @@ int main(void)
 	    return 1;
     }
     while(1) {
-	    if(notify_data_flag) {
-		    notify_data_flag = 0;
-		    bt_gatt_notify(NULL, &custom_service.attrs[1], data_packet, sizeof(data_packet));
+	    if(att_index == 1 || att_index == 3) {
+		    bt_gatt_notify(NULL, &custom_service.attrs[att_index], Rx_data, sizeof(Rx_data));
+		    att_index = 0;
 	    }
-#if 0
-	    if(notify_alert_flag) {
-		    notify_alert_flag = 0;
-		    bt_gatt_notify(NULL, &custom_service.attrs[3], alert_packet, sizeof(alert_packet));
-	    }
-#endif
     }
 
     return 0;
