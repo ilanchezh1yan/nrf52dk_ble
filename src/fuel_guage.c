@@ -1,10 +1,5 @@
-#include <stdint.h>
-#include "nrf_twi.h"
-#include "nrf_drv_twi.h"
-
-#include "nrf_log.h"
-#include "nrf_log_ctrl.h"
-#include "nrf_log_default_backends.h"
+#define F_G_
+#include "./fuel_gauge.h"
 
 #define SCL_PIN 27
 #define SDA_PIN 26
@@ -12,15 +7,6 @@
 #define SLAVE_ADDRESS 0x36
 #define SLAVE_READ (SLAVE_ADDRESS << 1) | 1
 #define SLAVE_WRITE (SLAVE_ADDRESS << 1)
-
-struct Registers {
-      uint16_t RepCap;
-      uint16_t FullCapRep;
-      uint16_t Age;
-      uint16_t Cycles;
-      uint16_t TimerH;
-      uint16_t Rcell;
-};
 
 /*
     structure for modelconfigure(0xDB) register of MAX1726x IC.
@@ -51,11 +37,6 @@ struct ModelCFG_Reg {
       uint8_t Refresh : 1;   
 };
 
-struct Write_chunk {
-      uint8_t address;
-      uint16_t data;
-};
-
 enum Read_Reg_Address {
       IChgTerm = 0x1E,
       ModelCFG = 0xDB,
@@ -67,10 +48,15 @@ enum Read_Reg_Address {
       Cycles = 0x17,
       TimerH = 0xBE,
       Rcell = 0x14,
+      TTE = 0x11,
+      TTF = 0x20,
+      Rsence = 0xD0,
+      Vempty = 0x3A,
 };
 
 
-extern char data_array[13];   //from main.c
+extern char data_array[10];   //from main.c
+extern char App_data_array[20]; // from main.c
 static const nrf_drv_twi_t twi_master = NRF_DRV_TWI_INSTANCE(0);
 
 void twi_init (void)
@@ -91,7 +77,15 @@ void twi_init (void)
     nrf_drv_twi_enable(&twi_master);
 }
 
-uint16_t Master_read(uint8_t Reg_add)
+static uint8_t chksum8(const unsigned char *buff, size_t len)
+{
+    unsigned int sum;
+    for ( sum = 0 ; len != 0 ; len-- )
+        sum += *(buff++);
+    return (uint8_t)sum;
+}
+
+static uint16_t Master_read(uint8_t Reg_add)
 {
   ret_code_t err;
   uint16_t buffer = 0;
@@ -104,10 +98,10 @@ uint16_t Master_read(uint8_t Reg_add)
   if(err != NRF_SUCCESS)
     NRF_LOG_DEBUG("twi error");
 
-  return (buffer << 8 | buffer >> 8);
+  return buffer;
 }
 
-void Master_write(struct Write_chunk Reg)
+static void Master_write(struct Write_chunk Reg)
 {
   ret_code_t err;
   
@@ -116,9 +110,11 @@ void Master_write(struct Write_chunk Reg)
     NRF_LOG_DEBUG("twi error");
 }
 
-void FG_Reg_write(uint8_t address, uint16_t data)
+static void FG_Reg_write(uint8_t address, uint16_t data)
 {
   struct Write_chunk Reg;
+
+  //data = (data << 8) | (data >> 8);
 
   Reg.address = address;
   Reg.data = data;  
@@ -127,23 +123,36 @@ void FG_Reg_write(uint8_t address, uint16_t data)
 
 void battery_status(void) 
 { 
-  data_array[10] = (uint8_t)(Master_read(RepSOC));
+
+  int16_t *ptr = (uint16_t *)&data_array[5];
+  data_array[3] = (uint8_t)(Master_read(RepSOC) >> 8);
+
+  if(data_array[4]) {
+          *ptr = Master_read(TTE);
+          data_array[4] |= 1 << 1;
+           
+  }
+  else {
+          *ptr = Master_read(TTF);
+          data_array[4] &= ~(3 << 1);
+  }
+
+  data_array[9] = chksum8(&data_array[3], 6);
 }
 
-void battery_profile(void)
+void battery_profile(void *data_pointer)
 {
-  struct Registers FG_reg;
-
-  FG_reg.FullCapRep = Master_read(FullCapRep);
-  FG_reg.Age = Master_read(Age);
-  FG_reg.Cycles = Master_read(Cycles);
-  FG_reg.TimerH = Master_read(TimerH);
-  FG_reg.RepCap = Master_read(RepCap);
-  FG_reg.Rcell = Master_read(Rcell);
-   
+  struct fuel_gauge *Profile_data = (struct fuel_gauge *)data_pointer;
+  Profile_data->FG.FullCapRep = Master_read(FullCapRep);
+  Profile_data->FG.Age = (uint8_t)(Master_read(Age) >> 8);
+  Profile_data->FG.Cycles = Master_read(Cycles);
+  Profile_data->FG.TimerH = Master_read(TimerH);
+  Profile_data->FG.RepCap = Master_read(RepCap);
+  Profile_data->FG.Rcell = Master_read(Rcell);
+  Profile_data->CRC = chksum8((const unsigned char *)&Profile_data->FG.FullCapRep, 11); 
 }
 
-void configure_battery(void *ptr)
+void configure_battery()
 {
   uint16_t *struct_ptr;
 
@@ -155,11 +164,30 @@ void configure_battery(void *ptr)
                           .D14 = 0,
                           .Refresh = 0
                         };
-                     
+                   
+  Data.modelID = App_data_array[5];
+  Data.VChg = App_data_array[8];
   struct_ptr = (uint16_t *)&Data;
 
   FG_Reg_write(ModelCFG, *struct_ptr);  // to configure battery model based on chemical property.
-  FG_Reg_write(DesignCap, 0);          // battery capacity in mAh.
-  FG_Reg_write(IChgTerm,0);             // charge termination current in mA
-}
 
+  struct_ptr = (uint16_t *)&App_data_array[3];
+  FG_Reg_write(DesignCap, *struct_ptr);          // battery capacity in mAh.
+  
+  FG_Reg_write(IChgTerm,(uint16_t)(6.4 * App_data_array[6]));             // charge termination current in mA
+
+  FG_Reg_write(Vempty, (uint16_t)App_data_array[6]);
+
+  FG_Reg_write(Rsence, 0);
+
+#if 0
+  struct fuel_gauge Profile_data;
+  Profile_data.FG.FullCapRep = Master_read(ModelCFG);
+  Profile_data.FG.Cycles = Master_read(Rsence);
+  Profile_data.FG.TimerH = Master_read(IChgTerm);
+  Profile_data.FG.RepCap = Master_read(Vempty);
+  Profile_data.FG.Rcell = Master_read(DesignCap);
+  Profile_data.FG.Age = (Master_read(Rcell));
+#endif
+
+}
